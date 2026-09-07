@@ -12,9 +12,8 @@ class USSDServiceKT : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         currentEvent = AccessibilityEvent.obtain(event)
         val ussd = USSDController
-        if (ussd.isRunning != true || !isUssdWidget(event)) return
-
         val response = responseText(event)
+        if (ussd.isRunning != true || (!isUssdWidget(event) && !hasCarrierTitle(response))) return
         if (isTransientMessage(response)) return
         when {
             isConfiguredMessage(event, USSDController.KEY_LOGIN) && !hasInput(event) -> finish(event, response, 0)
@@ -36,7 +35,7 @@ class USSDServiceKT : AccessibilityService() {
         val packageName = event.packageName?.toString()?.lowercase().orEmpty()
         return className.contains("alertdialog") || className.contains("ussd") ||
             packageName.contains("com.android.phone") || packageName.contains("telephony") ||
-            packageName.contains("dialer")
+            packageName.contains("telecom") || packageName.contains("dialer")
     }
 
     private fun isConfiguredMessage(event: AccessibilityEvent, key: String): Boolean {
@@ -49,7 +48,20 @@ class USSDServiceKT : AccessibilityService() {
         val normalized = response.lowercase().replace('…', '.').trim()
         return normalized.isEmpty() || normalized.contains("ussd code running") ||
             normalized.contains("ussd running") || normalized.contains("please wait") ||
-            normalized.contains("processing request")
+            normalized.contains("processing request") || isCarrierTitleOnly(response)
+    }
+
+    private fun hasCarrierTitle(response: String): Boolean {
+        val text = response.lowercase()
+        return text.contains("telesom message") || text.contains("somtel message") ||
+            text.contains("phone services")
+    }
+
+    private fun isCarrierTitleOnly(response: String): Boolean {
+        val lines = response.lines().map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+        return lines.isNotEmpty() && lines.all {
+            it == "telesom message" || it == "somtel message" || it == "phone services"
+        }
     }
 
     override fun onInterrupt() = Unit
