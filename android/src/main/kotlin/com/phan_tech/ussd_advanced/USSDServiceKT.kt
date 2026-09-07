@@ -15,6 +15,7 @@ class USSDServiceKT : AccessibilityService() {
         if (ussd.isRunning != true || !isUssdWidget(event)) return
 
         val response = responseText(event)
+        if (isTransientMessage(response)) return
         when {
             isConfiguredMessage(event, USSDController.KEY_LOGIN) && !hasInput(event) -> finish(event, response, 0)
             isConfiguredMessage(event, USSDController.KEY_ERROR) -> finish(event, response, 0)
@@ -42,6 +43,13 @@ class USSDServiceKT : AccessibilityService() {
         val text = responseText(event).lowercase()
         return text.isNotEmpty() && USSDController.map[key].orEmpty()
             .any { text.contains(it.lowercase()) }
+    }
+
+    private fun isTransientMessage(response: String): Boolean {
+        val normalized = response.lowercase().replace('…', '.').trim()
+        return normalized.isEmpty() || normalized.contains("ussd code running") ||
+            normalized.contains("ussd running") || normalized.contains("please wait") ||
+            normalized.contains("processing request")
     }
 
     override fun onInterrupt() = Unit
@@ -95,7 +103,8 @@ class USSDServiceKT : AccessibilityService() {
 
         private fun addText(values: MutableSet<String>, value: CharSequence?) {
             val text = value?.toString()?.trim().orEmpty()
-            if (text.isEmpty() || text.uppercase() in setOf("SEND", "CANCEL", "OK")) return
+            if (text.isEmpty() || text.equals("null", ignoreCase = true) ||
+                text.uppercase() in setOf("SEND", "CANCEL", "OK")) return
             values.add(text)
         }
 
