@@ -5,6 +5,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
@@ -66,8 +68,19 @@ class USSDServiceKT : AccessibilityService() {
 
     override fun onInterrupt() = Unit
 
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        serviceInstance = this
+    }
+
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        if (serviceInstance === this) serviceInstance = null
+        return super.onUnbind(intent)
+    }
+
     companion object {
         private var currentEvent: AccessibilityEvent? = null
+        @Volatile private var serviceInstance: USSDServiceKT? = null
 
         @JvmStatic fun send(text: String) {
             currentEvent?.let { setText(it, text); clickButton(it, 1) }
@@ -80,6 +93,78 @@ class USSDServiceKT : AccessibilityService() {
 
         @JvmStatic fun cancel() { currentEvent?.let { clickButton(it, 0) } }
         @JvmStatic fun cancel2(event: AccessibilityEvent) { clickButton(event, 0) }
+
+        /**
+         * Dismiss only the currently-visible ZAAD class-0 message that contains
+         * the exact OTP already captured and submitted by the host app.
+         * Never send BACK to an arbitrary telephony dialog or active USSD form.
+         */
+        @JvmStatic fun dismissMatchedZaadFlashSms(otp: String, callback: (String) -> Unit) {
+            if (!otp.matches(Regex("^[0-9]{6}$"))) {
+                callback("INVALID_OTP")
+                return
+            }
+            val service = serviceInstance
+            if (service == null) {
+                callback("ACCESSIBILITY_SERVICE_UNAVAILABLE")
+                return
+            }
+            val root = service.rootInActiveWindow
+            if (root == null) {
+                callback("ACTIVE_WINDOW_UNAVAILABLE")
+                return
+            }
+            val packageName = root.packageName?.toString().orEmpty()
+            if (packageName != "com.android.phone") {
+                callback("ACTIVE_WINDOW_NOT_TELEPHONY")
+                return
+            }
+            val text = rootText(root).lowercase()
+            if (!text.contains("zaad services") ||
+                !text.contains("access code") ||
+                !text.contains(otp)) {
+                callback("MATCHED_ZAAD_FLASH_NOT_VISIBLE")
+                return
+            }
+            if (containsInput(root)) {
+                callback("ACTIVE_TELEPHONY_INPUT_LEFT_UNTOUCHED")
+                return
+            }
+
+            if (!service.performGlobalAction(GLOBAL_ACTION_BACK)) {
+                callback("DISMISS_ACTION_REJECTED")
+                return
+            }
+            Handler(Looper.getMainLooper()).postDelayed({
+                val after = service.rootInActiveWindow
+                val stillVisible = after != null &&
+                    after.packageName?.toString() == "com.android.phone" &&
+                    rootText(after).lowercase().let { visible ->
+                        visible.contains("zaad services") &&
+                            visible.contains("access code") && visible.contains(otp)
+                    }
+                callback(if (stillVisible) "DISMISS_NOT_CONFIRMED" else "DISMISS_CONFIRMED")
+            }, 400L)
+        }
+
+        private fun rootText(root: AccessibilityNodeInfo): String {
+            val values = linkedSetOf<String>()
+            collectText(root, values)
+            return values.joinToString(" ")
+        }
+
+        private fun collectText(node: AccessibilityNodeInfo, values: MutableSet<String>) {
+            node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(values::add)
+            node.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(values::add)
+            repeat(node.childCount) { index -> node.getChild(index)?.let { collectText(it, values) } }
+        }
+
+        private fun containsInput(root: AccessibilityNodeInfo): Boolean {
+            if (root.className?.toString() == "android.widget.EditText") return true
+            return (0 until root.childCount).any { index ->
+                root.getChild(index)?.let(::containsInput) == true
+            }
+        }
 
         private fun setText(event: AccessibilityEvent, data: String) {
             val arguments = Bundle().apply {

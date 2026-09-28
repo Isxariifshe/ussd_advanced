@@ -60,6 +60,20 @@ class UssdAdvanced {
     });
   }
 
+  /// Attempts a guarded dismissal of the currently visible ZAAD class-0 OTP
+  /// dialog. Native Android returns an explicit result; it does not dismiss
+  /// unrelated telephony dialogs or USSD input screens.
+  static Future<String> dismissMatchedZaadFlashSms({
+    required String otp,
+  }) async {
+    if (!RegExp(r'^[0-9]{6}$').hasMatch(otp)) return 'INVALID_OTP';
+    final result = await _channel.invokeMethod<String>(
+      'dismissMatchedZaadFlashSms',
+      {'otp': otp},
+    );
+    return result ?? 'DISMISS_RESULT_UNAVAILABLE';
+  }
+
   static Future<String?> sendMessage(String message) async {
     var _response = await _basicMessageChannel.send(message).catchError((e) {
       throw e;

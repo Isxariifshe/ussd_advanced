@@ -176,6 +176,12 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
       "multisessionUssdCancel" ->{
         multisessionUssdCancel()
       }
+      "dismissMatchedZaadFlashSms" -> {
+        val otp = call.argument<String>("otp").orEmpty()
+        USSDServiceKT.dismissMatchedZaadFlashSms(otp) { status ->
+          result.success(status)
+        }
+      }
       else -> {
         result.notImplemented()
       }
