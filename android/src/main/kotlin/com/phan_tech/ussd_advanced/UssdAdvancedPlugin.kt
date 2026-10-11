@@ -13,7 +13,6 @@ import android.telecom.TelecomManager
 import android.telephony.TelephonyManager
 import android.telephony.TelephonyManager.UssdResponseCallback
 import android.view.accessibility.AccessibilityEvent
-import android.view.accessibility.AccessibilityManager
 import androidx.annotation.NonNull
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -27,6 +26,7 @@ import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import io.flutter.plugin.common.StringCodec
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.atomic.AtomicBoolean
 
 
 /** UssdAdvancedPlugin */
@@ -38,7 +38,6 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
   private lateinit var channel : MethodChannel
   private var context: Context? = null
   private var activity: Activity? = null
-  private var senderActivity: Activity? = null
   private val ussdApi: USSDApi = USSDController
   private var event: AccessibilityEvent? = null
   private val pendingReplyLock = Any()
@@ -67,11 +66,11 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
   }
 
   override fun onDetachedFromActivityForConfigChanges() {
-    senderActivity = null
+    activity = null
   }
 
   override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
-    senderActivity = binding.activity
+    activity = binding.activity
   }
 
   private fun setListener(){
@@ -174,16 +173,22 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
         }
       }
       "multisessionUssd" -> {
-
-        // check permissions
-        if(
-          !hasPermissions()
-        ){
-          requestPermissions()
-          result.success(null)
-
-
-        }else if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M){
+        // This method also runs from the SMS background engine. Do not launch
+        // Settings or a permission dialog from this path.
+        val appContext = context?.applicationContext
+        if (appContext == null) {
+          result.success("USSD_AUTOMATION_UNAVAILABLE: Android application context is unavailable.")
+        } else if (ContextCompat.checkSelfPermission(
+            appContext, android.Manifest.permission.CALL_PHONE,
+          ) != PackageManager.PERMISSION_GRANTED) {
+          result.success("USSD_PERMISSION_REQUIRED: Grant Phone permission before enabling recharge automation.")
+        } else if (ContextCompat.checkSelfPermission(
+            appContext, android.Manifest.permission.READ_PHONE_STATE,
+          ) != PackageManager.PERMISSION_GRANTED) {
+          result.success("USSD_PERMISSION_REQUIRED: Grant Phone State permission before enabling recharge automation.")
+        } else if (!isAccessibilityServiceEnabled(appContext)) {
+          result.success("USSD_ACCESSIBILITY_REQUIRED: Enable Kaashy Admin's USSD accessibility service in Android Settings. No USSD was dialed.")
+        } else if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M){
           multisessionUssd(code!!, subscriptionId, result)
 
         }else{
@@ -207,30 +212,31 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
   }
 
     private fun hasPermissions() : Boolean{
-        return !(
-                ContextCompat.checkSelfPermission(context!!, android.Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED ||
-                ContextCompat.checkSelfPermission(this.context!!, android.Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED ||
-                !isAccessibilityServiceEnabled(this.context!!)
-                )
+        val appContext = context?.applicationContext ?: return false
+        return ContextCompat.checkSelfPermission(appContext, android.Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED &&
+            ContextCompat.checkSelfPermission(appContext, android.Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED &&
+            isAccessibilityServiceEnabled(appContext)
     }
 
     private fun requestPermissions(){
-        if(!isAccessibilityServiceEnabled(this.context!!)) {
+        val appContext = context?.applicationContext ?: return
+        if(!isAccessibilityServiceEnabled(appContext)) {
             val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
             intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            this.context!!.startActivity(intent)
+            appContext.startActivity(intent)
 
         }
 
-        if (ContextCompat.checkSelfPermission(context!!, android.Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
-            if (!ActivityCompat.shouldShowRequestPermissionRationale(activity!!, android.Manifest.permission.CALL_PHONE)) {
-                ActivityCompat.requestPermissions(activity!!, arrayOf(android.Manifest.permission.CALL_PHONE), 2)
+        val attachedActivity = activity ?: return
+        if (ContextCompat.checkSelfPermission(appContext, android.Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
+            if (!ActivityCompat.shouldShowRequestPermissionRationale(attachedActivity, android.Manifest.permission.CALL_PHONE)) {
+                ActivityCompat.requestPermissions(attachedActivity, arrayOf(android.Manifest.permission.CALL_PHONE), 2)
             }
         }
 
-        if (ContextCompat.checkSelfPermission(this.context!!, android.Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
-            if (!ActivityCompat.shouldShowRequestPermissionRationale(activity!!, android.Manifest.permission.READ_PHONE_STATE)) {
-                ActivityCompat.requestPermissions(activity!!, arrayOf(android.Manifest.permission.READ_PHONE_STATE), 2)
+        if (ContextCompat.checkSelfPermission(appContext, android.Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+            if (!ActivityCompat.shouldShowRequestPermissionRationale(attachedActivity, android.Manifest.permission.READ_PHONE_STATE)) {
+                ActivityCompat.requestPermissions(attachedActivity, arrayOf(android.Manifest.permission.READ_PHONE_STATE), 2)
             }
         }
 
@@ -334,7 +340,18 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
       slot = 0
     }
 
-    ussdApi.callUSSDInvoke(activity!!, ussdCode, slot, object : USSDController.CallbackInvoke {
+    val appContext = context?.applicationContext
+    if (appContext == null) {
+      result.success("USSD_AUTOMATION_UNAVAILABLE: Android application context is unavailable.")
+      return
+    }
+    val initialResultDelivered = AtomicBoolean(false)
+    fun deliverInitialResult(response: String?) {
+      if (initialResultDelivered.compareAndSet(false, true)) result.success(response)
+    }
+
+    try {
+      ussdApi.callUSSDInvoke(appContext, ussdCode, slot, object : USSDController.CallbackInvoke {
 
       override fun responseInvoke(ev: AccessibilityEvent) {
         event = AccessibilityEvent.obtain(ev)
@@ -342,9 +359,9 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
 
         try {
           val response = USSDServiceKT.extractResponseText(ev)
-          result.success(response.ifBlank { null })
+          deliverInitialResult(response.ifBlank { null })
         }catch (e: Exception){
-          result.success(null)
+          deliverInitialResult(null)
         }
       }
 
@@ -352,12 +369,23 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
         try {
           completePendingSendReply(message)
           basicMessageChannel.send(message)
-          result.success(message)
-          basicMessageChannel.setMessageHandler(null)
+          deliverInitialResult(message)
         }catch (e: Exception){}
+        finally {
+          event?.recycle()
+          event = null
+          basicMessageChannel.setMessageHandler(null)
+        }
 
       }
-    })
+      })
+    } catch (error: Exception) {
+      deliverInitialResult(
+        "USSD_AUTOMATION_DIAL_FAILED: ${error.message ?: error.javaClass.simpleName}"
+      )
+      completePendingSendReply("USSD_AUTOMATION_DIAL_FAILED: ${error.message ?: error.javaClass.simpleName}")
+      basicMessageChannel.setMessageHandler(null)
+    }
   }
 
   private fun completePendingSendReply(message: String?) {
@@ -456,19 +484,7 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
   }
 
   private fun isAccessibilityServiceEnabled(context: Context): Boolean{
-    var accessibilityEnabled: Boolean
-    accessibilityEnabled = false
-    val service = "com.phan_tech.ussd_advanced.USSDServiceKT"
-    val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
-    val enabledServices = am.getEnabledAccessibilityServiceList(AccessibilityEvent.TYPES_ALL_MASK)
-    for (enabledService in enabledServices) {
-      val id = enabledService.id
-      if (id.contains(service)) {
-        accessibilityEnabled = true
-        break
-      }
-    }
-    return accessibilityEnabled
+    return USSDController.verifyAccessibilityAccess(context.applicationContext)
 
   }
 

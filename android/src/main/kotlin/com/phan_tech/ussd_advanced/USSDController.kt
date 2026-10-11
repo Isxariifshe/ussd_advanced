@@ -11,7 +11,6 @@
 package com.phan_tech.ussd_advanced
 
 import android.annotation.SuppressLint
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -112,7 +111,9 @@ object USSDController : USSDInterface, USSDApi {
         if (verifyAccessibilityAccess(this.context)) {
             dialUp(ussdPhoneNumber, simSlot)
         } else {
-            this.callbackInvoke.over("Check your accessibility")
+            this.callbackInvoke.over(
+                "USSD_ACCESSIBILITY_REQUIRED: Enable the USSD accessibility service before dialing. No USSD was dialed."
+            )
         }
     }
 
@@ -227,30 +228,30 @@ object USSDController : USSDInterface, USSDApi {
      * @return The enable value of the accessibility
      */
     override fun verifyAccessibilityAccess(context: Context): Boolean =
-            isAccessibilityServicesEnable(context).also {
-                if (!it) openSettingsAccessibility(context as Activity)
-            }
-
-
-    private fun openSettingsAccessibility(activity: Activity) {
-        activity.startActivityForResult(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS), 1)
-    }
+        isAccessibilityServicesEnable(context.applicationContext)
 
     private fun isAccessibilityServicesEnable(context: Context): Boolean {
-        (context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager)?.apply {
-            installedAccessibilityServiceList.forEach { service ->
-                if (service.id.contains(context.packageName) &&
-                        Settings.Secure.getInt(context.applicationContext.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED) == 1){
-                    Settings.Secure.getString(context.applicationContext.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)?.let {
-                        if (it.split(':').contains(service.id)) return true
-                    }
-                }else if(service.id.contains(context.packageName) && Settings.Secure.getString(context.applicationContext.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES).toString().contains(service.id)){
-                    return true;
-                }
-
-
-            }
+        val appContext = context.applicationContext
+        val enabledSetting = Settings.Secure.getString(
+            appContext.contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+        ).orEmpty()
+        val expectedComponent = android.content.ComponentName(
+            appContext,
+            USSDServiceKT::class.java,
+        ).flattenToString()
+        val enabledComponents = enabledSetting.split(':').map { it.trim() }
+        if (enabledComponents.any { it.equals(expectedComponent, ignoreCase = true) }) {
+            return true
         }
-        return false
+
+        val manager = appContext.getSystemService(Context.ACCESSIBILITY_SERVICE)
+                as? AccessibilityManager ?: return false
+        return manager.getEnabledAccessibilityServiceList(
+            android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK,
+        ).any { service ->
+            service.resolveInfo.serviceInfo.packageName == appContext.packageName &&
+                service.resolveInfo.serviceInfo.name == USSDServiceKT::class.java.name
+        }
     }
 }
