@@ -341,13 +341,11 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
         setListener()
 
         try {
-          if(ev.text.isNotEmpty()) {
-            result.success(java.lang.String.join("\n", ev.text))
-//            result.success(ev.text.first().toString())
-          }else{
-            result.success(null)
-          }
-        }catch (e: Exception){}
+          val response = USSDServiceKT.extractResponseText(ev)
+          result.success(response.ifBlank { null })
+        }catch (e: Exception){
+          result.success(null)
+        }
       }
 
       override fun over(message: String) {

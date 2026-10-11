@@ -232,8 +232,11 @@ class USSDServiceKT : AccessibilityService() {
             }
         }
 
-        private fun hasInput(event: AccessibilityEvent) = leaves(event)
-            .any { it.className?.toString() == "android.widget.EditText" }
+        private fun hasInput(event: AccessibilityEvent): Boolean {
+            val root = activeUssdRoot(event)
+            return if (root != null) nodes(root).any(::isTextInput)
+            else leaves(event).any(::isTextInput)
+        }
 
         private fun clickButton(event: AccessibilityEvent, index: Int): Boolean {
             val root = activeUssdRoot(event) ?: return false
@@ -287,9 +290,11 @@ class USSDServiceKT : AccessibilityService() {
             val expectedPackage = event.packageName?.toString()
             val service = serviceInstance
             val roots = mutableListOf<AccessibilityNodeInfo>()
-            try {
-                service?.windows?.forEach { window -> window.root?.let(roots::add) }
-            } catch (_: Exception) { }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                try {
+                    service?.windows?.forEach { window -> window.root?.let(roots::add) }
+                } catch (_: Exception) { }
+            }
             try {
                 service?.rootInActiveWindow?.let(roots::add)
             } catch (_: Exception) { }
@@ -301,10 +306,7 @@ class USSDServiceKT : AccessibilityService() {
                 }
                 roots.add(root)
             }
-            val distinctRoots = roots.distinctBy {
-                "${it.packageName}:${it.windowId}:${it.className}:${it.childCount}"
-            }
-            val telephonyRoots = distinctRoots.filter { root ->
+            val telephonyRoots = roots.filter { root ->
                 val packageName = root.packageName?.toString()?.lowercase().orEmpty()
                 packageName.contains("phone") || packageName.contains("telephony") ||
                     packageName.contains("telecom") || packageName.contains("dialer") ||
@@ -312,11 +314,17 @@ class USSDServiceKT : AccessibilityService() {
             }
             return telephonyRoots.firstOrNull { root ->
                 nodes(root).any(::isTextInput)
-            } ?: telephonyRoots.firstOrNull()
+            } ?: telephonyRoots.firstOrNull { root ->
+                nodes(root).any { node ->
+                    node.isClickable || !node.text.isNullOrBlank() ||
+                        !node.contentDescription.isNullOrBlank()
+                }
+            }
         }
 
         private fun isTextInput(node: AccessibilityNodeInfo): Boolean =
-            node.isEditable || node.className?.toString() == "android.widget.EditText"
+            node.className?.toString() == "android.widget.EditText" ||
+                (Build.VERSION.SDK_INT >= 18 && node.isEditable)
 
         private fun describeControls(root: AccessibilityNodeInfo): String {
             val controls = nodes(root).mapNotNull { node ->
@@ -334,7 +342,7 @@ class USSDServiceKT : AccessibilityService() {
             val values = linkedSetOf<String>()
             event.text.forEach { addText(values, it) }
             activeUssdRoot(event)?.let { root ->
-                nodes(root).filterNot { it.isEditable }.forEach { node ->
+                nodes(root).filterNot(::isTextInput).forEach { node ->
                     addText(values, node.text)
                     addText(values, node.contentDescription)
                 }
@@ -344,7 +352,7 @@ class USSDServiceKT : AccessibilityService() {
 
         private fun screenText(root: AccessibilityNodeInfo): String {
             val values = linkedSetOf<String>()
-            nodes(root).filterNot { it.isEditable }.forEach { node ->
+            nodes(root).filterNot(::isTextInput).forEach { node ->
                 addText(values, node.text)
                 addText(values, node.contentDescription)
             }
