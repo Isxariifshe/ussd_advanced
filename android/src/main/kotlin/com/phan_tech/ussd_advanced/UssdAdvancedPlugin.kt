@@ -77,8 +77,16 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
   }
 
   override fun onMessage(message: String?, reply: BasicMessageChannel.Reply<String?>) {
-    if(message != null){
-      USSDController.send2(message, event!!){
+    if(message == null){
+      reply.reply("USSD_AUTOMATION_INPUT_FAILED: Confirmation reply was empty.")
+      return
+    }
+    val activeEvent = event
+    if(activeEvent == null){
+      reply.reply("USSD_AUTOMATION_INPUT_FAILED: No active USSD prompt is available.")
+      return
+    }
+    val submitted = USSDController.send2(message, activeEvent){
         event = AccessibilityEvent.obtain(it)
         try {
           if(it.text.isNotEmpty()) {
@@ -88,7 +96,9 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
           }
         } catch (e: Exception){}
 
-      }
+    }
+    if (!submitted) {
+      reply.reply("USSD_AUTOMATION_INPUT_FAILED: Could not enter the reply and activate the USSD Send button.")
     }
   }
 

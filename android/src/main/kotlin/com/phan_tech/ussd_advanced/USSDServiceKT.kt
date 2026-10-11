@@ -86,9 +86,10 @@ class USSDServiceKT : AccessibilityService() {
             currentEvent?.let { setText(it, text); clickButton(it, 1) }
         }
 
-        @JvmStatic fun send2(text: String, event: AccessibilityEvent) {
-            setText(event, text)
-            clickButton(event, 1)
+        @JvmStatic fun send2(text: String, event: AccessibilityEvent): Boolean {
+            val root = activeUssdRoot(event) ?: return false
+            if (!setText(root, text)) return false
+            return clickSendButton(root)
         }
 
         @JvmStatic fun cancel() { currentEvent?.let { clickButton(it, 0) } }
@@ -166,26 +167,93 @@ class USSDServiceKT : AccessibilityService() {
             }
         }
 
-        private fun setText(event: AccessibilityEvent, data: String) {
+        private fun setText(event: AccessibilityEvent, data: String): Boolean {
+            return setText(event.source, data)
+        }
+
+        private fun setText(root: AccessibilityNodeInfo?, data: String): Boolean {
+            if (root == null) return false
             val arguments = Bundle().apply {
                 putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, data)
             }
-            leaves(event).filter { it.className?.toString() == "android.widget.EditText" }.forEach { node ->
-                if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)) {
+            val inputs = nodes(root).filter { it.className?.toString() == "android.widget.EditText" }
+            if (inputs.isEmpty()) return false
+            return inputs.any { node ->
+                val set = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+                if (set) {
+                    node.refresh()
+                    if (node.text?.toString() == data) return@any true
+                }
+                val pasted = run {
                     val clipboard = USSDController.context
                         .getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                     clipboard?.setPrimaryClip(ClipData.newPlainText("text", data))
                     node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
                 }
+                node.refresh()
+                pasted && node.text?.toString() == data
             }
         }
 
         private fun hasInput(event: AccessibilityEvent) = leaves(event)
             .any { it.className?.toString() == "android.widget.EditText" }
 
-        private fun clickButton(event: AccessibilityEvent, index: Int) {
-            leaves(event).filter { it.className?.toString()?.lowercase()?.contains("button") == true }
-                .getOrNull(index)?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        private fun clickButton(event: AccessibilityEvent, index: Int): Boolean {
+            val root = activeUssdRoot(event) ?: return false
+            val buttons = nodes(root).filter {
+                it.isClickable && it.className?.toString()?.lowercase()?.contains("button") == true
+            }
+            return buttons.getOrNull(index)?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+        }
+
+        private fun clickSendButton(root: AccessibilityNodeInfo): Boolean {
+            val allNodes = nodes(root)
+            val sendLabels = setOf("send", "ok", "continue", "submit", "sii wad", "dir", "haye")
+            val labelMatch = allNodes.firstOrNull { node ->
+                val label = listOf(node.text, node.contentDescription)
+                    .mapNotNull { it?.toString()?.trim()?.lowercase() }
+                label.any { it in sendLabels } && clickNodeOrClickableParent(node)
+            }
+            if (labelMatch != null) return true
+
+            val buttons = allNodes.filter {
+                it.isClickable && it.className?.toString()?.lowercase()?.contains("button") == true
+            }
+            val positiveButton = buttons.firstOrNull {
+                it.viewIdResourceName?.substringAfterLast('/') == "button1"
+            }
+            if (positiveButton?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) {
+                return true
+            }
+            if (buttons.size >= 2) {
+                return buttons.last().performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            }
+            val onlyButton = buttons.singleOrNull() ?: return false
+            val onlyLabel = onlyButton.text?.toString()?.trim()?.lowercase().orEmpty()
+            if (onlyLabel in setOf("cancel", "back", "no", "bax")) return false
+            return onlyButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
+
+        private fun clickNodeOrClickableParent(node: AccessibilityNodeInfo): Boolean {
+            var candidate: AccessibilityNodeInfo? = node
+            repeat(5) {
+                val current = candidate ?: return false
+                if (current.isClickable) {
+                    return current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                }
+                candidate = current.parent
+            }
+            return false
+        }
+
+        private fun activeUssdRoot(event: AccessibilityEvent): AccessibilityNodeInfo? {
+            val expectedPackage = event.packageName?.toString()
+            val active = serviceInstance?.rootInActiveWindow
+            if (active != null && (expectedPackage == null ||
+                    active.packageName?.toString() == expectedPackage)) {
+                return active
+            }
+            return event.source
         }
 
         private fun responseText(event: AccessibilityEvent): String {
@@ -209,6 +277,18 @@ class USSDServiceKT : AccessibilityService() {
             val result = mutableListOf<AccessibilityNodeInfo>()
             collectLeaves(event.source, result)
             return result
+        }
+
+        private fun nodes(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
+            val result = mutableListOf<AccessibilityNodeInfo>()
+            collectNodes(root, result)
+            return result
+        }
+
+        private fun collectNodes(node: AccessibilityNodeInfo?, result: MutableList<AccessibilityNodeInfo>) {
+            if (node == null) return
+            result.add(node)
+            repeat(node.childCount) { collectNodes(node.getChild(it), result) }
         }
 
         private fun collectLeaves(node: AccessibilityNodeInfo?, result: MutableList<AccessibilityNodeInfo>) {

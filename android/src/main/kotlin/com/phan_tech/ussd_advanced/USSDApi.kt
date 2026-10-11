@@ -22,7 +22,7 @@ import java.util.*
  */
 interface USSDApi {
     fun send(text: String, callbackMessage: (AccessibilityEvent) -> Unit)
-    fun send2(text: String, event: AccessibilityEvent, callbackMessage: (AccessibilityEvent) -> Unit)
+    fun send2(text: String, event: AccessibilityEvent, callbackMessage: (AccessibilityEvent) -> Unit): Boolean
     fun cancel()
     fun cancel2(event: AccessibilityEvent)
     fun callUSSDInvoke(context: Context, ussdPhoneNumber: String,

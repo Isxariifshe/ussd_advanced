@@ -165,7 +165,7 @@ object USSDController : USSDInterface, USSDApi {
      * @param[text] String will be sent by EditText
      */
     override fun sendData(text: String) = USSDServiceKT.send(text)
-    override fun sendData2(text: String, event: AccessibilityEvent) = USSDServiceKT.send2(text, event)
+    override fun sendData2(text: String, event: AccessibilityEvent): Boolean = USSDServiceKT.send2(text, event)
 
 
     override fun stopRunning() {
@@ -189,10 +189,13 @@ object USSDController : USSDInterface, USSDApi {
         sendType = true
         ussdInterface?.sendData(text)
     }
-    override fun send2(text: String, event: AccessibilityEvent, callbackMessage: (AccessibilityEvent) -> Unit) {
-        this.callbackMessage = callbackMessage
-        sendType = true
-        ussdInterface?.sendData2(text, event)
+    override fun send2(text: String, event: AccessibilityEvent, callbackMessage: (AccessibilityEvent) -> Unit): Boolean {
+        val submitted = ussdInterface?.sendData2(text, event) ?: false
+        if (submitted) {
+            this.callbackMessage = callbackMessage
+            sendType = true
+        }
+        return submitted
     }
 
     /**
