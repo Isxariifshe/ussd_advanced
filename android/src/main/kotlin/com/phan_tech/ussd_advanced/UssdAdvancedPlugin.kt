@@ -41,6 +41,8 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
   private var senderActivity: Activity? = null
   private val ussdApi: USSDApi = USSDController
   private var event: AccessibilityEvent? = null
+  private val pendingReplyLock = Any()
+  private var pendingSendReply: BasicMessageChannel.Reply<String?>? = null
 
 
   private lateinit var basicMessageChannel: BasicMessageChannel<String>
@@ -86,19 +88,22 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
       reply.reply("USSD_AUTOMATION_INPUT_FAILED: No active USSD prompt is available.")
       return
     }
+    synchronized(pendingReplyLock) {
+      // A previous sendMessage call that never received a carrier response
+      // must not steal the reply for a new confirmation.
+      pendingSendReply?.reply("USSD_AUTOMATION_INPUT_FAILED: Previous USSD response was not received.")
+      pendingSendReply = reply
+    }
     val submitted = USSDController.send2(message, activeEvent){
         event = AccessibilityEvent.obtain(it)
-        try {
-          if(it.text.isNotEmpty()) {
-            reply.reply(it.text.first().toString())
-          }else{
-            reply.reply(null)
-          }
-        } catch (e: Exception){}
+        val response = USSDServiceKT.extractResponseText(it)
+        if (response.isNotBlank()) {
+          completePendingSendReply("USSD_AUTOMATION_PROMPT_PENDING: $response")
+        }
 
     }
     if (!submitted) {
-      reply.reply("USSD_AUTOMATION_INPUT_FAILED: Could not enter the reply and activate the USSD Send button.")
+      completePendingSendReply("USSD_AUTOMATION_INPUT_FAILED: Could not enter the reply and activate the USSD Send button.")
     }
   }
 
@@ -344,6 +349,7 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
 
       override fun over(message: String) {
         try {
+          completePendingSendReply(message)
           basicMessageChannel.send(message)
           result.success(message)
           basicMessageChannel.setMessageHandler(null)
@@ -351,6 +357,19 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
 
       }
     })
+  }
+
+  private fun completePendingSendReply(message: String?) {
+    val reply = synchronized(pendingReplyLock) {
+      val current = pendingSendReply
+      pendingSendReply = null
+      current
+    }
+    try {
+      reply?.reply(message)
+    } catch (_: Exception) {
+      // A reply may already have been delivered by an accessibility event.
+    }
   }
 
   private fun multisessionUssdCancel(){

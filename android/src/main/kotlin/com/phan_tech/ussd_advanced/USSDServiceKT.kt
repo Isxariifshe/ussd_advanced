@@ -82,6 +82,8 @@ class USSDServiceKT : AccessibilityService() {
         private var currentEvent: AccessibilityEvent? = null
         @Volatile private var serviceInstance: USSDServiceKT? = null
 
+        @JvmStatic fun extractResponseText(event: AccessibilityEvent): String = responseText(event)
+
         @JvmStatic fun send(text: String) {
             currentEvent?.let { setText(it, text); clickButton(it, 1) }
         }
