@@ -21,7 +21,9 @@ class USSDServiceKT : AccessibilityService() {
             isConfiguredMessage(event, USSDController.KEY_LOGIN) && !hasInput(event) -> finish(event, response, 0)
             isConfiguredMessage(event, USSDController.KEY_ERROR) -> finish(event, response, 0)
             !hasInput(event) -> finish(event, response, 0)
-            ussd.sendType == true -> ussd.callbackMessage?.invoke(event)
+            ussd.sendType == true -> {
+                if (isNewPromptResponse(response)) ussd.callbackMessage?.invoke(event)
+            }
             else -> USSDController.callbackInvoke.responseInvoke(event)
         }
     }
@@ -81,6 +83,7 @@ class USSDServiceKT : AccessibilityService() {
     companion object {
         private var currentEvent: AccessibilityEvent? = null
         @Volatile private var serviceInstance: USSDServiceKT? = null
+        @Volatile private var lastSubmittedPromptText: String = ""
 
         @JvmStatic fun extractResponseText(event: AccessibilityEvent): String = responseText(event)
 
@@ -90,8 +93,14 @@ class USSDServiceKT : AccessibilityService() {
 
         @JvmStatic fun send2(text: String, event: AccessibilityEvent): Boolean {
             val root = activeUssdRoot(event) ?: return false
+            lastSubmittedPromptText = screenText(root).normalizedPrompt()
             if (!setText(root, text)) return false
             return clickSendButton(root)
+        }
+
+        private fun isNewPromptResponse(response: String): Boolean {
+            val current = response.normalizedPrompt()
+            return current.isNotEmpty() && current != lastSubmittedPromptText
         }
 
         @JvmStatic fun cancel() { currentEvent?.let { clickButton(it, 0) } }
@@ -261,12 +270,26 @@ class USSDServiceKT : AccessibilityService() {
         private fun responseText(event: AccessibilityEvent): String {
             val values = linkedSetOf<String>()
             event.text.forEach { addText(values, it) }
-            leaves(event).forEach { node ->
+            activeUssdRoot(event)?.let { root ->
+                nodes(root).filterNot { it.isEditable }.forEach { node ->
+                    addText(values, node.text)
+                    addText(values, node.contentDescription)
+                }
+            }
+            return values.joinToString("\n")
+        }
+
+        private fun screenText(root: AccessibilityNodeInfo): String {
+            val values = linkedSetOf<String>()
+            nodes(root).filterNot { it.isEditable }.forEach { node ->
                 addText(values, node.text)
                 addText(values, node.contentDescription)
             }
             return values.joinToString("\n")
         }
+
+        private fun String.normalizedPrompt(): String =
+            trim().lowercase().replace(Regex("\\s+"), " ")
 
         private fun addText(values: MutableSet<String>, value: CharSequence?) {
             val text = value?.toString()?.trim().orEmpty()
