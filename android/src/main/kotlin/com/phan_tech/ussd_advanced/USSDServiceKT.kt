@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -84,6 +85,7 @@ class USSDServiceKT : AccessibilityService() {
         private var currentEvent: AccessibilityEvent? = null
         @Volatile private var serviceInstance: USSDServiceKT? = null
         @Volatile private var lastSubmittedPromptText: String = ""
+        @Volatile private var lastInputFailureReason: String = ""
 
         @JvmStatic fun extractResponseText(event: AccessibilityEvent): String = responseText(event)
 
@@ -92,11 +94,35 @@ class USSDServiceKT : AccessibilityService() {
         }
 
         @JvmStatic fun send2(text: String, event: AccessibilityEvent): Boolean {
-            val root = activeUssdRoot(event) ?: return false
+            val root = activeUssdRoot(event)
+            if (root == null) {
+                lastInputFailureReason = "No active telephony accessibility window was available."
+                return false
+            }
             lastSubmittedPromptText = screenText(root).normalizedPrompt()
-            if (!setText(root, text)) return false
-            return clickSendButton(root)
+            val inputNodes = nodes(root).filter { isTextInput(it) }
+            if (inputNodes.isEmpty()) {
+                lastInputFailureReason = "The active USSD window has no accessible text input. ${describeControls(root)}"
+                return false
+            }
+            if (!setText(root, text)) {
+                lastInputFailureReason = "Android did not accept text in the USSD input. ${describeControls(root)}"
+                return false
+            }
+            val buttonActivated = clickSendButton(root)
+            val imeActionActivated = !buttonActivated && Build.VERSION.SDK_INT >= 30 &&
+                inputNodes.any { input ->
+                    input.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+                }
+            if (!buttonActivated && !imeActionActivated) {
+                lastInputFailureReason = "The USSD input accepted the reply, but no Send/OK control could be activated. ${describeControls(root)}"
+                return false
+            }
+            lastInputFailureReason = ""
+            return true
         }
+
+        @JvmStatic fun getLastInputFailureReason(): String = lastInputFailureReason
 
         private fun isNewPromptResponse(response: String): Boolean {
             val current = response.normalizedPrompt()
@@ -187,7 +213,7 @@ class USSDServiceKT : AccessibilityService() {
             val arguments = Bundle().apply {
                 putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, data)
             }
-            val inputs = nodes(root).filter { it.className?.toString() == "android.widget.EditText" }
+            val inputs = nodes(root).filter { isTextInput(it) }
             if (inputs.isEmpty()) return false
             return inputs.any { node ->
                 val set = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
@@ -259,12 +285,49 @@ class USSDServiceKT : AccessibilityService() {
 
         private fun activeUssdRoot(event: AccessibilityEvent): AccessibilityNodeInfo? {
             val expectedPackage = event.packageName?.toString()
-            val active = serviceInstance?.rootInActiveWindow
-            if (active != null && (expectedPackage == null ||
-                    active.packageName?.toString() == expectedPackage)) {
-                return active
+            val service = serviceInstance
+            val roots = mutableListOf<AccessibilityNodeInfo>()
+            try {
+                service?.windows?.forEach { window -> window.root?.let(roots::add) }
+            } catch (_: Exception) { }
+            try {
+                service?.rootInActiveWindow?.let(roots::add)
+            } catch (_: Exception) { }
+            event.source?.let { source ->
+                var root = source
+                repeat(20) {
+                    val parent = root.parent ?: return@repeat
+                    root = parent
+                }
+                roots.add(root)
             }
-            return event.source
+            val distinctRoots = roots.distinctBy {
+                "${it.packageName}:${it.windowId}:${it.className}:${it.childCount}"
+            }
+            val telephonyRoots = distinctRoots.filter { root ->
+                val packageName = root.packageName?.toString()?.lowercase().orEmpty()
+                packageName.contains("phone") || packageName.contains("telephony") ||
+                    packageName.contains("telecom") || packageName.contains("dialer") ||
+                    (expectedPackage != null && packageName == expectedPackage.lowercase())
+            }
+            return telephonyRoots.firstOrNull { root ->
+                nodes(root).any(::isTextInput)
+            } ?: telephonyRoots.firstOrNull()
+        }
+
+        private fun isTextInput(node: AccessibilityNodeInfo): Boolean =
+            node.isEditable || node.className?.toString() == "android.widget.EditText"
+
+        private fun describeControls(root: AccessibilityNodeInfo): String {
+            val controls = nodes(root).mapNotNull { node ->
+                val label = node.text?.toString()?.trim().orEmpty()
+                    .ifEmpty { node.contentDescription?.toString()?.trim().orEmpty() }
+                if (label.isNotEmpty() && (node.isClickable || isTextInput(node))) {
+                    "${node.className?.toString()?.substringAfterLast('.')}=$label"
+                } else null
+            }.take(8)
+            val packageName = root.packageName?.toString().orEmpty()
+            return "Window=$packageName/${root.className}; controls=${controls.joinToString(", ").ifEmpty { "none exposed" }}."
         }
 
         private fun responseText(event: AccessibilityEvent): String {

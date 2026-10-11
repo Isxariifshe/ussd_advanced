@@ -103,7 +103,10 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
 
     }
     if (!submitted) {
-      completePendingSendReply("USSD_AUTOMATION_INPUT_FAILED: Could not enter the reply and activate the USSD Send button.")
+      val reason = USSDServiceKT.getLastInputFailureReason()
+      completePendingSendReply(
+        "USSD_AUTOMATION_INPUT_FAILED: ${reason.ifBlank { "Could not enter the reply and activate the USSD Send button." }}"
+      )
     }
   }
 
