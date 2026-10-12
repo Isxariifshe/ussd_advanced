@@ -109,6 +109,19 @@ class UssdAdvanced {
     }
   }
 
+  /// Returns the bounded, locally persisted Android USSD diagnostic ring buffer.
+  /// It stores event metadata and response lengths, not USSD text or PIN values.
+  static Future<Map<String, dynamic>> getDiagnostics() async {
+    try {
+      final result = await _channel.invokeMapMethod<String, dynamic>(
+        'getDiagnostics',
+      );
+      return result ?? <String, dynamic>{};
+    } catch (_) {
+      return <String, dynamic>{};
+    }
+  }
+
   static void requestPermissions() {
     try {
       _channel.invokeMethod('requestPermissions');

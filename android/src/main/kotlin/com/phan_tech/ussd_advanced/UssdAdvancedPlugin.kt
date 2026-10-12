@@ -78,6 +78,9 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
   }
 
   override fun onMessage(message: String?, reply: BasicMessageChannel.Reply<String?>) {
+    context?.let { USSDServiceKT.recordDiagnostic(it, "confirmation_reply_received", mapOf(
+      "replyLength" to (message?.length ?: 0).toString(),
+    )) }
     if(message == null){
       reply.reply("USSD_AUTOMATION_INPUT_FAILED: Confirmation reply was empty.")
       return
@@ -145,6 +148,13 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
         result.success(null)
 
       }
+      "getDiagnostics" -> {
+        val appContext = context?.applicationContext
+        result.success(
+          if (appContext == null) emptyMap<String, Any>()
+          else USSDServiceKT.diagnosticReport(appContext),
+        )
+      }
       "sendUssd" -> {
         result.success(defaultUssdService(code!!, subscriptionId))
 
@@ -181,12 +191,15 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
         } else if (ContextCompat.checkSelfPermission(
             appContext, android.Manifest.permission.CALL_PHONE,
           ) != PackageManager.PERMISSION_GRANTED) {
+          USSDServiceKT.recordDiagnostic(appContext, "preflight_failed", mapOf("reason" to "call_phone_permission"))
           result.success("USSD_PERMISSION_REQUIRED: Grant Phone permission before enabling recharge automation.")
         } else if (ContextCompat.checkSelfPermission(
             appContext, android.Manifest.permission.READ_PHONE_STATE,
           ) != PackageManager.PERMISSION_GRANTED) {
+          USSDServiceKT.recordDiagnostic(appContext, "preflight_failed", mapOf("reason" to "read_phone_state_permission"))
           result.success("USSD_PERMISSION_REQUIRED: Grant Phone State permission before enabling recharge automation.")
         } else if (!isAccessibilityServiceEnabled(appContext)) {
+          USSDServiceKT.recordDiagnostic(appContext, "preflight_failed", mapOf("reason" to "accessibility_service_disabled"))
           result.success("USSD_ACCESSIBILITY_REQUIRED: Enable Kaashy Admin's USSD accessibility service in Android Settings. No USSD was dialed.")
         } else if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M){
           multisessionUssd(code!!, subscriptionId, result)
@@ -345,6 +358,11 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
       result.success("USSD_AUTOMATION_UNAVAILABLE: Android application context is unavailable.")
       return
     }
+    USSDServiceKT.recordDiagnostic(appContext, "ussd_call_requested", mapOf(
+      "simSlot" to slot.toString(),
+      "codePrefix" to Regex("^\\*\\d{3}\\*").find(ussdCode)?.value.orEmpty(),
+      "codeLength" to ussdCode.length.toString(),
+    ))
     val initialResultDelivered = AtomicBoolean(false)
     fun deliverInitialResult(response: String?) {
       if (initialResultDelivered.compareAndSet(false, true)) result.success(response)
@@ -359,14 +377,24 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
 
         try {
           val response = USSDServiceKT.extractResponseText(ev)
+          USSDServiceKT.recordDiagnostic(appContext, "initial_prompt_callback", mapOf(
+            "textLength" to response.length.toString(),
+            "responseEmpty" to response.isBlank().toString(),
+          ))
           deliverInitialResult(response.ifBlank { null })
         }catch (e: Exception){
+          USSDServiceKT.recordDiagnostic(appContext, "initial_prompt_callback_failed", mapOf(
+            "errorType" to e.javaClass.simpleName,
+          ))
           deliverInitialResult(null)
         }
       }
 
       override fun over(message: String) {
         try {
+          USSDServiceKT.recordDiagnostic(appContext, "ussd_session_ended", mapOf(
+            "textLength" to message.length.toString(),
+          ))
           completePendingSendReply(message)
           basicMessageChannel.send(message)
           deliverInitialResult(message)
@@ -380,6 +408,10 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
       }
       })
     } catch (error: Exception) {
+      USSDServiceKT.recordDiagnostic(appContext, "ussd_call_exception", mapOf(
+        "errorType" to error.javaClass.simpleName,
+        "hasMessage" to (!error.message.isNullOrBlank()).toString(),
+      ))
       deliverInitialResult(
         "USSD_AUTOMATION_DIAL_FAILED: ${error.message ?: error.javaClass.simpleName}"
       )

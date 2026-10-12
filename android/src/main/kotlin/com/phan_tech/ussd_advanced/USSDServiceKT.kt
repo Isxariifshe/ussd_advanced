@@ -10,6 +10,8 @@ import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import org.json.JSONArray
+import org.json.JSONObject
 
 class USSDServiceKT : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
@@ -17,6 +19,15 @@ class USSDServiceKT : AccessibilityService() {
         val ussd = USSDController
         val response = responseText(event)
         if (ussd.isRunning != true || (!isUssdWidget(event) && !hasCarrierTitle(response))) return
+        recordDiagnostic(this, "accessibility_event", mapOf(
+            "eventType" to event.eventType.toString(),
+            "package" to event.packageName?.toString().orEmpty(),
+            "class" to event.className?.toString().orEmpty(),
+            "windowId" to event.windowId.toString(),
+            "textLength" to response.length.toString(),
+            "hasInput" to hasInput(event).toString(),
+            "responseKind" to responseKind(response),
+        ))
         if (isTransientMessage(response)) return
         when {
             isConfiguredMessage(event, USSDController.KEY_LOGIN) && !hasInput(event) -> finish(event, response, 0)
@@ -30,6 +41,11 @@ class USSDServiceKT : AccessibilityService() {
     }
 
     private fun finish(event: AccessibilityEvent, response: String, buttonIndex: Int) {
+        recordDiagnostic(this, "session_finished", mapOf(
+            "textLength" to response.length.toString(),
+            "responseKind" to responseKind(response),
+            "hasInput" to hasInput(event).toString(),
+        ))
         USSDController.stopRunning()
         USSDController.callbackInvoke.over(response)
         clickButton(event, buttonIndex)
@@ -74,6 +90,7 @@ class USSDServiceKT : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         serviceInstance = this
+        recordDiagnostic(this, "accessibility_service_connected")
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
@@ -82,10 +99,77 @@ class USSDServiceKT : AccessibilityService() {
     }
 
     companion object {
+        private const val DIAGNOSTIC_PREFS = "ussd_advanced_diagnostics"
+        private const val DIAGNOSTIC_EVENTS_KEY = "events"
+        private const val MAX_DIAGNOSTIC_EVENTS = 120
+        private val diagnosticLock = Any()
         private var currentEvent: AccessibilityEvent? = null
         @Volatile private var serviceInstance: USSDServiceKT? = null
         @Volatile private var lastSubmittedPromptText: String = ""
         @Volatile private var lastInputFailureReason: String = ""
+
+        @JvmStatic fun recordDiagnostic(
+            context: Context,
+            phase: String,
+            details: Map<String, String> = emptyMap(),
+        ) {
+            try {
+                synchronized(diagnosticLock) {
+                    val prefs = context.applicationContext.getSharedPreferences(
+                        DIAGNOSTIC_PREFS, Context.MODE_PRIVATE,
+                    )
+                    val events = JSONArray(prefs.getString(DIAGNOSTIC_EVENTS_KEY, "[]"))
+                    val item = JSONObject()
+                        .put("time", System.currentTimeMillis())
+                        .put("phase", phase.take(80))
+                    details.forEach { (key, value) -> item.put(key.take(60), value.take(240)) }
+                    events.put(item)
+                    while (events.length() > MAX_DIAGNOSTIC_EVENTS) events.remove(0)
+                    prefs.edit().putString(DIAGNOSTIC_EVENTS_KEY, events.toString()).apply()
+                }
+            } catch (_: Exception) {
+                // Diagnostics must never interrupt an active USSD session.
+            }
+        }
+
+        @JvmStatic fun diagnosticReport(context: Context): Map<String, Any> {
+            val prefs = context.applicationContext.getSharedPreferences(
+                DIAGNOSTIC_PREFS, Context.MODE_PRIVATE,
+            )
+            val events = JSONArray(prefs.getString(DIAGNOSTIC_EVENTS_KEY, "[]"))
+            val eventList = (0 until events.length()).mapNotNull { index ->
+                events.optJSONObject(index)?.let { item ->
+                    val event = linkedMapOf<String, Any>()
+                    val keys = item.keys()
+                    while (keys.hasNext()) {
+                        val key = keys.next()
+                        event[key] = item.opt(key) ?: ""
+                    }
+                    event
+                }
+            }
+            return mapOf(
+                "device" to mapOf(
+                    "manufacturer" to Build.MANUFACTURER,
+                    "model" to Build.MODEL,
+                    "androidRelease" to Build.VERSION.RELEASE,
+                    "sdkInt" to Build.VERSION.SDK_INT,
+                    "package" to context.packageName,
+                ),
+                "events" to eventList,
+            )
+        }
+
+        private fun responseKind(response: String): String {
+            val normalized = response.lowercase()
+            return when {
+                response.isBlank() -> "empty"
+                normalized.contains("connection problem") || normalized.contains("invalid mmi") -> "network_or_mmi_error"
+                normalized.contains("waxaad codsatay") || normalized.contains("riix 1") -> "confirmation_prompt"
+                normalized.contains("successful") || normalized.contains("completed") || normalized.contains("guuleysatay") -> "success_like"
+                else -> "text"
+            }
+        }
 
         @JvmStatic fun extractResponseText(event: AccessibilityEvent): String = responseText(event)
 
@@ -97,16 +181,27 @@ class USSDServiceKT : AccessibilityService() {
             val root = activeUssdRoot(event)
             if (root == null) {
                 lastInputFailureReason = "No active telephony accessibility window was available."
+                recordDiagnostic(USSDController.context, "reply_failed_no_window")
                 return false
             }
             lastSubmittedPromptText = screenText(root).normalizedPrompt()
             val inputNodes = nodes(root).filter { isTextInput(it) }
             if (inputNodes.isEmpty()) {
                 lastInputFailureReason = "The active USSD window has no accessible text input. ${describeControls(root)}"
+                recordDiagnostic(USSDController.context, "reply_failed_no_input", mapOf(
+                    "rootPackage" to root.packageName?.toString().orEmpty(),
+                    "rootClass" to root.className?.toString().orEmpty(),
+                    "controls" to controlsSummary(root),
+                ))
                 return false
             }
             if (!setText(root, text)) {
                 lastInputFailureReason = "Android did not accept text in the USSD input. ${describeControls(root)}"
+                recordDiagnostic(USSDController.context, "reply_failed_set_text", mapOf(
+                    "rootPackage" to root.packageName?.toString().orEmpty(),
+                    "inputCount" to inputNodes.size.toString(),
+                    "controls" to controlsSummary(root),
+                ))
                 return false
             }
             val buttonActivated = clickSendButton(root)
@@ -116,9 +211,21 @@ class USSDServiceKT : AccessibilityService() {
                 }
             if (!buttonActivated && !imeActionActivated) {
                 lastInputFailureReason = "The USSD input accepted the reply, but no Send/OK control could be activated. ${describeControls(root)}"
+                recordDiagnostic(USSDController.context, "reply_failed_send_control", mapOf(
+                    "rootPackage" to root.packageName?.toString().orEmpty(),
+                    "inputCount" to inputNodes.size.toString(),
+                    "buttonCount" to nodes(root).count { it.isClickable }.toString(),
+                    "controls" to controlsSummary(root),
+                ))
                 return false
             }
             lastInputFailureReason = ""
+            recordDiagnostic(USSDController.context, "reply_input_accepted", mapOf(
+                "rootPackage" to root.packageName?.toString().orEmpty(),
+                "inputCount" to inputNodes.size.toString(),
+                "buttonActivated" to buttonActivated.toString(),
+                "imeActionActivated" to imeActionActivated.toString(),
+            ))
             return true
         }
 
@@ -337,6 +444,25 @@ class USSDServiceKT : AccessibilityService() {
             val packageName = root.packageName?.toString().orEmpty()
             return "Window=$packageName/${root.className}; controls=${controls.joinToString(", ").ifEmpty { "none exposed" }}."
         }
+
+        private fun controlsSummary(root: AccessibilityNodeInfo): String = nodes(root)
+            .filter { it.isClickable || isTextInput(it) }
+            .take(12)
+            .joinToString(",") { node ->
+                val label = listOf(node.text, node.contentDescription)
+                    .mapNotNull { it?.toString()?.trim() }
+                    .firstOrNull { it.isNotEmpty() }
+                    ?.lowercase()
+                    ?.let { value ->
+                        when {
+                            value.contains("send") || value.contains("dir") -> "send"
+                            value.contains("ok") || value.contains("continue") -> "continue"
+                            value.contains("cancel") || value.contains("bax") -> "cancel"
+                            else -> "labeled"
+                        }
+                    } ?: "unlabeled"
+                "${node.className?.toString()?.substringAfterLast('.')}[$label]"
+            }.ifEmpty { "none" }
 
         private fun responseText(event: AccessibilityEvent): String {
             val values = linkedSetOf<String>()
