@@ -173,6 +173,15 @@ object USSDController : USSDInterface, USSDApi {
         isRunning = false
     }
 
+    /** Debug-only harness entry. The caller must reject non-debuggable apps. */
+    @JvmStatic fun beginDebugSession(context: Context, callback: CallbackInvoke) {
+        this.context = context.applicationContext
+        callbackInvoke = callback
+        callbackMessage = null
+        sendType = false
+        isRunning = true
+    }
+
     /**
      * The aim of this is to send text(contains 145 characters in avg.)
      *
