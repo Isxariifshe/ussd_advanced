@@ -259,7 +259,7 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
         }
       }
       "sendUssd" -> {
-        result.success(defaultUssdService(code!!, subscriptionId))
+        sendDefaultUssd(code!!, subscriptionId, result)
 
       }
       "sendAdvancedUssd" -> {
@@ -282,7 +282,7 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
             result.success(res);
           }
         }else{
-          result.success(defaultUssdService(code!!, subscriptionId))
+          sendDefaultUssd(code!!, subscriptionId, result)
         }
       }
       "multisessionUssd" -> {
@@ -308,7 +308,7 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
           multisessionUssd(code!!, subscriptionId, result)
 
         }else{
-          result.success(defaultUssdService(code!!, subscriptionId))
+          sendDefaultUssd(code!!, subscriptionId, result)
         }
 
       }
@@ -687,13 +687,23 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
     "slotIdx"
   )
 
+  // A launch acknowledgement is null, never kotlin.Unit (not a channel value).
+  private fun sendDefaultUssd(code: String, simPosition: Int, result: Result) {
+    try {
+      defaultUssdService(code, simPosition)
+      result.success(null)
+    } catch (error: SecurityException) {
+      result.error("PERMISSION_DENIED", "Phone permission is required.", null)
+    } catch (error: Exception) {
+      // Keep payment codes and phone numbers out of the error payload.
+      result.error("REQUEST_FAILED", "Unable to start the USSD request. Check the selected SIM.", null)
+    }
+  }
+
   // multiple for all
   private fun defaultUssdService(ussdCode:String, subscriptionId:Int){
     if (ContextCompat.checkSelfPermission(this.context!!, android.Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
-      if (ActivityCompat.shouldShowRequestPermissionRationale(activity!!, android.Manifest.permission.CALL_PHONE)) {
-      } else {
-        ActivityCompat.requestPermissions(activity!!, arrayOf(android.Manifest.permission.CALL_PHONE), 2)
-      }
+      throw SecurityException("CALL_PHONE permission is required")
     }
     try {
       // use defaulft sim
@@ -720,18 +730,17 @@ class UssdAdvancedPlugin: FlutterPlugin, MethodCallHandler, ActivityAware, Basic
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M){
           if (ContextCompat.checkSelfPermission(this.context!!, android.Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
-            if (ActivityCompat.shouldShowRequestPermissionRationale(activity!!, android.Manifest.permission.READ_PHONE_STATE)) {
-            } else {
-              ActivityCompat.requestPermissions(activity!!, arrayOf(android.Manifest.permission.READ_PHONE_STATE), 2)
-            }
+            throw SecurityException("READ_PHONE_STATE permission is required")
           }
           val telecomManager = this.context!!.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
 
-          val phoneAccountHandleList = telecomManager.callCapablePhoneAccounts
-          if (phoneAccountHandleList != null && phoneAccountHandleList.isNotEmpty())
-            intent.putExtra("android.telecom.extra.PHONE_ACCOUNT_HANDLE",
-              phoneAccountHandleList[sim]
-            );
+          // Flutter SIM discovery and Telecom's account list can differ or change.
+          // Validate against the native list immediately before launching the call.
+          val account = selectUssdPhoneAccount(
+            telecomManager.callCapablePhoneAccounts, subscriptionId
+          )
+          intent.putExtra("android.telecom.extra.PHONE_ACCOUNT_HANDLE", account)
+
         }
       }
 
