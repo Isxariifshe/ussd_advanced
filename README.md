@@ -2,6 +2,19 @@
 
 Run ussd code directly in your application
 
+## Basic USSD SIM selection
+
+For `sendUssd`, the legacy `subscriptionId` argument is a **one-based account
+position** (1 = first, 2 = second), or -1 to let Android use its default routing.
+It is not an opaque Android SubscriptionManager ID. Advanced session APIs keep
+their existing argument semantics.
+
+The account list is checked again at call time. An absent explicit selection
+returns `PlatformException` with code `REQUEST_FAILED` without dialing a different
+account. Missing permissions return `PERMISSION_DENIED`. A successful launch
+returns null internally; it only acknowledges the dial intent, not payment
+completion. Carrier/account ordering still needs validation on the target device.
+
 ## Usage
 
 Add dependency to pubspec.yaml file
